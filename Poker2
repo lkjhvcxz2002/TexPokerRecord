@@ -1,0 +1,328 @@
+# -*- coding: utf-8 -*-
+
+import time
+import json
+from websocket import create_connection
+from pymongo import MongoClient
+from bson.objectid import ObjectId
+from datetime import datetime
+
+class AllCallBot():
+    def __init__(self, url, name):
+        self.dbConnect = MongoClient('localhost', 27017)
+        self.ws = create_connection(url)
+        self.name = name
+        self.playerName = None
+        self.take_fold = False
+        self.players = []
+        self.cards = []
+        self.boards = []
+        self.mychips = 0
+        self.winMoney = 0
+        self.loseGameThres = 4000
+        self.thresholdBet = 1000
+        self.safisfyChips = 4500
+        self.betGrid = {0: 500, 1: 1000, 2: 1500, 3: 2000, 4: 3000, 5: 4000}
+        self.satifyGrid = {0: 4500, 1: 6000, 2: 7500, 3: 9000, 4: 10500, 5: 12000}
+
+    def joinNewGame(self):
+        if self.mychips < self.loseGameThres: 
+            self.printMessage("Run")
+            time.sleep(5)
+
+        self.resetCards()
+
+        self.ws.send(json.dumps({
+            "eventName": "__join",
+            "data":{
+                "playerName": self.name
+            }}))
+
+    def takeAction(self, action):
+        print("========== [SELF] ACTION : " + action + ", Bet : ", str(self.minBet))
+        self.ws.send(json.dumps({
+            "eventName": "__action",
+            "data": {
+                "action": action,
+            }}))
+
+    def resetCards(self):
+        self.take_fold = False
+        self.gameNo = None
+        self.cards = []
+        self.boards = []
+
+    def updateTableAndPlayers(self, data):
+        self.table = data["table"]
+        self.players = data["players"]
+
+    def updateMySelf(self, data):
+        if self.table != None:
+            self.tableRound = self.table["roundCount"]
+            self.thresholdBet = self.betGrid[self.tableRound // 10]
+            self.safisfyChips = self.satifyGrid[self.tableRound // 10]
+        self.playerName = data['self']['playerName']
+        self.mychips = data["self"]["chips"]
+        self.cards = data["self"]["cards"]
+        self.minBet = data["self"]["minBet"]
+
+    def SaveRoundRecord(self, data):
+        db = MongoClient('localhost', 27017).texpoker
+        collection = db.record
+
+        # test if connection success
+        cursor = collection.find().sort("_id", -1)
+        lastRecord = cursor.next()
+        if self.gameNo == None:
+            self.gameNo = lastRecord["GameNo"] + 1
+        roundNo = lastRecord["RoundNo"] + 1
+
+        insert_dict = {"GameNo": self.gameNo, "RoundNo": roundNo, "Chips": self.mychips, "Hands": ",".join(sorted(self.selfPlayer["cards"])), 
+        "Table": ",".join(sorted(self.selfPlayer["hand"]["cards"])), 
+        "Bet": self.winMoney, "IsWinner": self.winMoney > 0, "UpdateTime": datetime.now()}
+        collection.insert_one(insert_dict)
+        
+    def SaveGameResult(self, data):
+        db = MongoClient('localhost', 27017).texpoker
+        collection = db.result
+
+        # test if connection success
+        cursor = collection.find().sort("_id", -1)
+        lastRecord = cursor.next()
+        gameNo = lastRecord["GameNo"] + 1
+
+        insert_dict = {"GameNo": gameNo, "Chips": 5000, "RoundCount": 33, "Duration(sec)": 600, 
+        "CallCount": 0, "RaiseCount": 0, "FoldCount": 0, "BetCount": 0, "AllInCount": 0, "LoseCount": 30, "WinCount": 0,
+        "UpdateTime": datetime.now()}
+        collection.insert_one(insert_dict) 
+
+    def printMessage(self, type):
+        if type == "card":
+            print("")
+            print("==============================================================================")
+            print("=====   CARD: " + ",".join(self.cards) + ", BOARD: " + ",".join(self.boards))
+            print("==============================================================================")
+            print("")
+
+        if type == "bet":
+            print("==============================================================================")
+            print("=================================== BET ", str(self.minBet))
+            print("==============================================================================")
+
+        if type == "new round":
+            survive = 0
+            for player in (self.players):
+                if player["isSurvive"] == True:
+                    survive += 1
+
+            print("==============================================================================")
+            print("======== NEW ROUND : ", str(self.table["roundCount"]) + ", PLAYERS : ", str(survive) + "/", str(len(self.players)) + ", Chip : ", str(self.mychips))
+            print("")
+
+        if type == "end round":
+            isWin = "[WIN]" if self.winMoney > 0 else "[LOSE]"
+
+            print("")
+            print("======== END ROUND : ", str(self.table["roundCount"]) + ", Chip : ", str(self.mychips)  + ", " + isWin + " Money : ", str(self.winMoney))
+            print("==============================================================================")
+    
+    def printAction(self, data):
+        isSelf = ""
+        if data["action"]["playerName"] == self.playerName:
+            isSelf = "[SELF] "
+
+        if data["action"]["action"] == "call" or data["action"]["action"] == "bet" or data["action"]["action"] == "allin":
+            print("========== " + isSelf + "PLAYER : " + data["action"]["playerName"] + ", ACTION : " + data["action"]["action"] + ", Chips : ", str(data["action"]["chips"]) + ", AMOUNT : ", str(data["action"]["amount"]))
+            
+            if data["action"]["action"] == "allin":
+                print("==============================================================================")
+                print("=================================== ALL IN ===================================")
+                print("==============================================================================")
+
+        else:
+            print("========== PLAYER : " + data["action"]["playerName"] + ", ACTION : " + data["action"]["action"] + ", Chips : ", data["action"]["chips"])
+
+    def calculationCard(self):
+        _hand = []
+        _boards = []
+
+        rank = [] #rank: 2~9, T(10), J(J), Q(Q), K(K), A(Ace).
+        suit = [] #suit: H(eart), S(pade), C(lub), D(iamond).
+        for card in self.cards:
+            _hand.append(card[0])
+            rank.append(card[0])
+            suit.append(card[1])
+
+        for card in self.boards:
+            _boards.append(card[0])
+            rank.append(card[0])
+            suit.append(card[1])
+
+        rank_txt = ",".join(sorted(rank))
+        suit_txt = ",".join(sorted(suit))
+
+        rank_dist = set(rank)
+        for dist in rank_dist:
+            if dist == "T":
+                dist = "IT"
+            if dist == "A":
+                dist = "RA"
+
+        isThreeOfKind = False
+        isStraight = False
+        isFlush = False
+        isFullhouse = False
+        isFourOfKind = False
+
+        #Three of a kind
+        if "2,2,2" in rank_txt or "3,3,3" in rank_txt or "4,4,4" in rank_txt or "5,5,5" in rank_txt or "6,6,6" in rank_txt or "7,7,7" in rank_txt or "8,8,8" in rank_txt or "9,9,9" in rank_txt:
+            isThreeOfKind = True
+        if "T,T,T" in rank_txt or "J,J,J" in rank_txt or "Q,Q,Q" in rank_txt or "K,K,K" in rank_txt or "A,A,A" in rank_txt:
+            isThreeOfKind = True
+        
+        #Straight
+        #T=>IT, A=>RA
+        if "2,3,4,5" in rank_dist and "RA" in rank_dist:
+            isStraight = True
+        if "2,3,4,5,6" in rank_dist or "3,4,5,6,7" in rank_dist or "4,5,6,7,8" in rank_dist or "5,6,7,8,9" in rank_dist:
+            isStraight = True
+        if "6,7,8,9,IT" in rank_dist or "7,8,9,IT,J" in rank_dist or "8,9,IT,J,Q" in rank_dist or "9,IT,J,Q,K" in rank_dist:
+            isStraight = True
+        if "IT,J,Q,K,RA" in rank_dist:
+            isStraight = True
+
+        #Flush
+        if "H,H,H,H,H" in suit_txt or "S,S,S,S,S" in suit_txt or "C,C,C,C,C" in suit_txt or "D,D,D,D,D" in suit_txt:
+            isFlush = True
+        
+        #Full house
+        fullHousePair = rank_txt.replace("2,2,2", "").replace("3,3,3", "").replace("4,4,4", "").replace("5,5,5", "").replace("6,6,6", "").replace("7,7,7", "").replace("8,8,8", "").replace("9,9,9", "")
+        fullHousePair = fullHousePair.replace("T,T,T", "").replace("J,J,J", "").replace("Q,Q,Q", "").replace("K,K,K", "").replace("A,A,A", "")
+        if "2,2" in fullHousePair or "3,3" in fullHousePair or "4,4" in fullHousePair or "5,5" in fullHousePair or "6,6" in fullHousePair or "7,7" in fullHousePair or "8,8" in fullHousePair or "9,9" in fullHousePair:
+            isFullhouse = isThreeOfKind and True
+        if "T,T" in fullHousePair or "J,J" in fullHousePair or "Q,Q" in fullHousePair or "K,K" in fullHousePair or "A,A" in fullHousePair:
+            isFullhouse = isThreeOfKind and True
+
+
+        #Four of a kind
+        if "2,2,2,2" in rank_txt or "3,3,3,3" in rank_txt or "4,4,4,4" in rank_txt or "5,5,5,5" in rank_txt or "6,6,6,6" in rank_txt or "7,7,7,7" in rank_txt or "8,8,8,8" in rank_txt or "9,9,9,9" in rank_txt:
+            isFourOfKind = True
+        if "T,T,T,T" in rank_txt or "J,J,J,J" in rank_txt or "Q,Q,Q,Q" in rank_txt or "K,K,K,K" in rank_txt or "A,A,A,A" in rank_txt:
+            isFourOfKind = True
+
+        #Straight flush
+
+        #Royal flush
+
+        print("======== Calculation Card ========")
+        print("isThreeOfKind:", isThreeOfKind)
+        print("isStraight: ", isStraight)
+        print("isFlush: ", isFlush)
+        print("isFullhouse: ", isFullhouse)
+        print("isFourOfKind: ", isFourOfKind)
+        print("")
+
+        return isThreeOfKind or isStraight or isFlush or isFullhouse or isFourOfKind
+
+    def handlerEvent(self, response):
+        event_name = response["eventName"]
+        data = response["data"]
+
+        if event_name == "__bet" or event_name == "__deal" or event_name == "__action" or event_name == "__game_over":
+            print(event_name)
+
+        if event_name == "__new_round":
+            self.updateTableAndPlayers(data)
+
+            # for player in (self.players):
+            #     if player["playerName"] == self.md5:
+            #         self.cards = player["cards"]
+            #         self.mychips = player["chips"]
+
+            self.printMessage("new round")
+            self.printMessage("card")
+
+        if event_name == "__bet":
+            self.updateMySelf(data)
+            self.printMessage("bet")
+
+            if self.minBet < self.thresholdBet:
+                self.takeAction("call")
+            else:
+                self.takeAction("fold")
+
+        if event_name == "__deal":
+            self.boards = data["table"]["board"]
+            self.printMessage("card")
+
+        if event_name == "__show_action":
+            self.updateTableAndPlayers(data)
+            self.printAction(data)
+
+            if data["action"]["action"] == "allin":
+                self.take_fold = True
+
+        if event_name == "__action":
+            self.updateMySelf(data)
+            self.printMessage("card")
+
+            action = "call" #default action
+
+            if self.take_fold == True or self.minBet > self.thresholdBet:
+                action = "fold"
+
+            if self.calculationCard() == True:
+                if data["game"]["roundName"] == "River":
+                    action = "allin"
+                else:
+                    action = "raise"
+
+            if self.mychips > self.safisfyChips:
+                self.printMessage("Satisfy")
+                action = "fold" # Satisfy with your own chips for now
+
+            self.takeAction(action)
+
+        if event_name == "__round_end":
+            self.updateTableAndPlayers(data)
+
+            for player in (self.players):
+                if player["playerName"] == self.playerName:
+                    self.selfPlayer = player
+                    self.mychips = player["chips"]
+                    self.winMoney = player["winMoney"]
+
+            # self.SaveRoundRecord(data)
+            self.printMessage("end round")
+            self.resetCards()
+
+        if event_name == "__game_over":
+            # self.SaveGameResult(data)
+            with open('record', 'a') as f:
+                f.write("{}\n".format(data))
+            if self.mychips < 4000:
+                time.sleep(7)
+                
+            self.joinNewGame()
+
+    def doListen(self):
+        try:
+            self.joinNewGame()
+
+            while True:
+                result = self.ws.recv()
+                response = json.loads(result)
+                self.handlerEvent(response)
+        except Exception as e:
+            print(e)
+            # self.doListen()
+
+
+if __name__ == '__main__':
+    url = "ws://poker-battle.vtr.trendnet.org:3001/" #"ws://poker-battle.vtr.trendnet.org:3001/" "ws://poker-training.vtr.trendnet.org:3001/"
+    name = "8dc998b7617f4782b8ecf5d14505cec9" # , austin
+    # url = "ws://poker-training.vtr.trendnet.org:3001/"
+    # name = "CannonFodder"
+
+    allin = AllCallBot(url, name)
+    allin.doListen()
